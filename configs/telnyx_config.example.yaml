@@ -1,0 +1,47 @@
+# Telnyx Configuration for GLaDOS Voice Calls
+# Replace these values with your actual Telnyx credentials
+
+# Telnyx API credentials
+api_key: "YOUR_API_KEY_HERE"  # Get this from your Telnyx portal
+sip_connection_id: "YOUR_CONNECTION_ID"  # Your Telnyx SIP connection ID
+from_number: "+1234567890"  # Your Telnyx phone number in E.164 format
+
+# Webhook settings
+# Use Cloudflare Tunnel for secure webhook endpoint
+webhook_url: "https://your-tunnel-domain.com/telnyx/webhook"
+
+# Media streaming configuration
+stream_config:
+  stream_url: "wss://your-media-endpoint.com/stream"  # Your WebSocket endpoint for media streaming
+  stream_track: "inbound_track"  # Track identifier for the media stream
+  stream_bidirectional: true  # Enable bidirectional audio
+  codec: "PCMU"  # Audio codec (PCMU or OPUS)
+  sampling_rate: 8000  # Audio sampling rate in Hz
+  channels: 1  # Number of audio channels (1 for mono)
+
+# DTMF Commands
+dtmf_commands:
+  "1":
+    digits: "1"
+    description: "Main menu"
+    handler: "handle_menu"
+  "2":
+    digits: "2"
+    description: "Weather report"
+    handler: "handle_weather"
+  "3":
+    digits: "3"
+    description: "Tell a joke"
+    handler: "handle_jokes"
+  "0":
+    digits: "0"
+    description: "Repeat menu"
+    handler: "handle_repeat"
+
+# Audio settings
+sample_rate: 16000  # GLaDOS TTS/ASR sample rate
+channels: 1  # GLaDOS audio channels
+
+# Call handling
+max_concurrent_calls: 1  # Maximum number of concurrent calls
+call_timeout: 300  # Call timeout in seconds 

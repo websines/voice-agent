@@ -164,3 +164,29 @@ cython_debug/
 *.bin
 *.gguf
 *.onnx
+
+# Virtual Environment
+.env
+.venv
+env/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# GLaDOS configs
+/configs/*
+!/configs/*.example.yaml
+
+# Logs
+*.log
+
+# Models
+models/
+
+# Local development
+.DS_Store

@@ -96,6 +96,19 @@ You can also get her to say something with:
 
     uv run glados say "The cake is real"
 
+## Phone Calls
+GLaDOS can now make phone calls using Telnyx SIP integration! To use this feature:
+
+1. Set up a Telnyx account and get your API credentials
+2. Create `configs/telnyx_config.yaml` with your settings (see Telephony module README)
+3. Make a call using:
+
+```bash
+uv run glados call "+1234567890"  # Replace with phone number in E.164 format
+```
+
+For detailed setup and configuration, see the [Telephony module documentation](src/glados/Telephony/README.md).
+
 ## Changing the LLM Model
 
 To use other models, use the command:
