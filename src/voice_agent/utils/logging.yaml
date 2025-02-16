@@ -1,0 +1,23 @@
+version: 1
+disable_existing_loggers: false
+formatters:
+  structured:
+    (): structlog.stdlib.ProcessorFormatter
+    processors:
+      - structlog.dev.ConsoleRenderer
+    foreign_pre_chain:
+      - structlog.stdlib.add_log_level
+      - structlog.processors.TimeStamper(fmt="iso")
+handlers:
+  console:
+    class: logging.StreamHandler
+    formatter: structured
+    stream: ext://sys.stdout
+loggers:
+  voice_agent:
+    level: DEBUG
+    handlers: [console]
+    propagate: false
+root:
+  level: INFO
+  handlers: [console]

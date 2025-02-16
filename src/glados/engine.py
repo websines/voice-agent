@@ -22,6 +22,8 @@ import yaml
 from .ASR import VAD, AudioTranscriber
 from .TTS import tts_glados, tts_kokoro
 from .utils import spoken_text_converter as stc
+from fastapi import FastAPI, Request, WebSocket
+from .Telephony.telnyx_client import TelnyxClient
 
 logger.remove(0)
 logger.add(sys.stderr, level="SUCCESS")
@@ -55,6 +57,8 @@ class GladosConfig(BaseModel):
     voice: str
     announcement: str | None = None
     personality_preprompt: list[PersonalityPrompt]
+    webhook_port: int = 8000
+    webhook_host: str = "0.0.0.0"
 
     @classmethod
     def from_yaml(cls, path: str | Path, key_to_config: tuple[str, ...] = ("Glados",)) -> "GladosConfig":
@@ -566,7 +570,7 @@ class Glados:
         completion_event = threading.Event()
 
         def stream_callback(
-            outdata: NDArray[np.float32], frames: int, time: dict[str, Any], status: sd.CallbackFlags
+            outdata: NDArray[np.float32], frames: int, time: dict[str, Any], status: CallbackFlags
         ) -> tuple[NDArray[np.float32], sd.CallbackStop | None]:
             nonlocal progress, interrupted
             progress += frames
@@ -904,6 +908,49 @@ class Glados:
         return text
 
 
+# def start() -> None:
+#     glados_config = GladosConfig.from_yaml("glados_config.yaml")
+#     glados = Glados.from_config(glados_config)
+    
+#     # Create and start web server in a separate thread
+#     def run_server():
+#         logger.info("Starting web server thread...")
+#         app = FastAPI()
+#         telnyx_client = TelnyxClient(glados_config.telnyx_config)
+
+#         @app.post("/telnyx-webhook")
+#         async def handle_telnyx_webhook(request: Request):
+#             payload = await request.json()
+#             telnyx_client.handle_webhook(payload)
+#             return {"status": "ok"}
+
+#         @app.websocket("/telnyx-media-stream")
+#         async def handle_telnyx_media_stream(websocket: WebSocket):
+#             await websocket.accept()
+#             try:
+#                 while True:
+#                     data = await websocket.receive_text()
+#                     # Process media stream data
+#                     telnyx_client.handle_media_stream(data)
+#             except WebSocketDisconnect:
+#                 logger.info("Telnyx media stream disconnected")
+
+#         import uvicorn
+#         uvicorn.run(
+#             app, 
+#             host=glados_config.webhook_host, 
+#             port=glados_config.webhook_port or 8000,  # Default to 8000 if not set
+#             ws_ping_timeout=300  # Keep WebSocket connections alive
+#         )
+
+#     import threading
+#     server_thread = threading.Thread(target=run_server, daemon=True)
+#     server_thread.start()
+
+#     # Start main voice assistant loop
+#     glados.start_listen_event_loop()
+
+
 def start() -> None:
     """Set up the LLM server and start GlaDOS.
 
@@ -917,7 +964,6 @@ def start() -> None:
     glados_config = GladosConfig.from_yaml("glados_config.yaml")
     glados = Glados.from_config(glados_config)
     glados.start_listen_event_loop()
-
 
 if __name__ == "__main__":
     start()

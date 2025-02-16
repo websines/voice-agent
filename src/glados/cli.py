@@ -13,6 +13,7 @@ from .TTS import tts_glados
 from .utils import spoken_text_converter as stc
 from .Telephony.telnyx_client import TelnyxClient, TelnyxConfig
 from .Telephony.call_manager import CallManager
+from .Telephony.webhook_server import initialize_webhook_server, start_webhook_server
 
 DEFAULT_CONFIG = Path("configs/glados_config.yaml")
 
@@ -188,7 +189,7 @@ def download_models() -> None:
                 sys.exit(1)
 
 
-def say(text: str, config_path: str | Path = "glados_config.yaml") -> None:
+def say(text: str, config_path: str | Path = "configs/glados_config.yaml") -> None:
     """
     Converts text to speech using the GLaDOS text-to-speech system and plays the generated audio.
 
@@ -217,27 +218,40 @@ def say(text: str, config_path: str | Path = "glados_config.yaml") -> None:
     sd.wait()
 
 
-def start(config_path: str | Path = "glados_config.yaml") -> None:
-    """
-    Start the GLaDOS voice assistant and initialize its listening event loop.
+def start(config_path: str | Path = "configs/glados_config.yaml") -> None:
+    """Start GLaDOS with the specified configuration."""
+    if not models_valid():
+        print("Required models are missing or invalid. Please run 'glados download' first.")
+        sys.exit(1)
 
-    This function loads the GLaDOS configuration from a YAML file, creates a GLaDOS instance,
-    and begins the continuous listening process for voice interactions.
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
 
-    Parameters:
-        config_path (str | Path, optional): Path to the configuration YAML file.
-            Defaults to "glados_config.yaml" in the current directory.
+    glados = Glados.from_config(GladosConfig(**config["Glados"]))
+    
+    # Initialize Telnyx client if config exists
+    telnyx_client = None
+    try:
+        with open("configs/telnyx_config.yaml") as f:
+            telnyx_config = yaml.safe_load(f)
+            telnyx_client = TelnyxClient(TelnyxConfig(**telnyx_config))
+            # Initialize webhook server with the client
+            initialize_webhook_server(telnyx_client)
+            # Start webhook server in a separate thread
+            import threading
+            webhook_thread = threading.Thread(
+                target=start_webhook_server,
+                kwargs={"host": "0.0.0.0", "port": 8000},
+                daemon=True
+            )
+            webhook_thread.start()
+            print("Webhook server started on http://0.0.0.0:8000")
 
-    Raises:
-        FileNotFoundError: If the specified configuration file cannot be found.
-        ValueError: If the configuration file is invalid or cannot be parsed.
+    except FileNotFoundError:
+        print("No Telnyx configuration found, running without telephony support")
+    except Exception as e:
+        print(f"Error initializing Telnyx client: {str(e)}")
 
-    Example:
-        start()  # Uses default configuration file
-        start("/path/to/custom/config.yaml")  # Uses a custom configuration file
-    """
-    glados_config = GladosConfig.from_yaml(str(config_path))
-    glados = Glados.from_config(glados_config)
     glados.start_listen_event_loop()
 
 
@@ -295,30 +309,15 @@ async def make_call(phone_number: str, config_path: str | Path = "configs/telnyx
 
 
 def main() -> None:
-    """
-    Main entry point for the GLaDOS voice assistant CLI.
+    """Main entry point for the GLaDOS CLI."""
+    parser = argparse.ArgumentParser(description="GLaDOS CLI")
+    subparsers = parser.add_subparsers(dest="command", help="Command to run")
 
-    This function parses command line arguments and executes the appropriate action based on
-    the provided command. Available commands include:
-    - start: Start the GLaDOS voice assistant
-    - say: Convert text to speech and play it
-    - download-models: Download required model files
-    - call: Make an outbound call using Telnyx integration
-
-    The function also checks for the presence and validity of required model files before
-    executing most commands.
-
-    Example:
-        $ glados start  # Start the voice assistant
-        $ glados say "Hello, world!"  # Speak the provided text
-        $ glados download-models  # Download required models
-        $ glados call "+1234567890"  # Make an outbound call
-    """
-    parser = argparse.ArgumentParser(description="GLaDOS Voice Assistant")
-    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+    # Download command
+    download_parser = subparsers.add_parser("download", help="Download required models")
 
     # Start command
-    start_parser = subparsers.add_parser("start", help="Start GLaDOS voice assistant")
+    start_parser = subparsers.add_parser("start", help="Start GLaDOS")
     start_parser.add_argument(
         "--config",
         type=str,
@@ -327,8 +326,8 @@ def main() -> None:
     )
 
     # Say command
-    say_parser = subparsers.add_parser("say", help="Convert text to speech and play it")
-    say_parser.add_argument("text", type=str, help="Text to speak")
+    say_parser = subparsers.add_parser("say", help="Make GLaDOS say something")
+    say_parser.add_argument("text", type=str, help="Text to say")
     say_parser.add_argument(
         "--config",
         type=str,
@@ -336,13 +335,31 @@ def main() -> None:
         help="Path to configuration file",
     )
 
-    # Download models command
-    subparsers.add_parser("download-models", help="Download required model files")
-    
     # Call command
-    call_parser = subparsers.add_parser("call", help="Make an outbound call")
-    call_parser.add_argument("phone_number", type=str, help="Phone number to call (E.164 format)")
+    call_parser = subparsers.add_parser("call", help="Make a phone call")
+    call_parser.add_argument("phone_number", type=str, help="Phone number to call")
     call_parser.add_argument(
+        "--config",
+        type=str,
+        default="configs/telnyx_config.yaml",
+        help="Path to Telnyx configuration file",
+    )
+
+    # Webhook command
+    webhook_parser = subparsers.add_parser("webhook", help="Start the webhook server")
+    webhook_parser.add_argument(
+        "--host",
+        type=str,
+        default="0.0.0.0",
+        help="Host to bind the webhook server to",
+    )
+    webhook_parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Port to run the webhook server on",
+    )
+    webhook_parser.add_argument(
         "--config",
         type=str,
         default="configs/telnyx_config.yaml",
@@ -351,23 +368,27 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.command == "download-models":
+    if args.command == "download":
         download_models()
     elif args.command == "start":
-        if not models_valid():
-            print("Required model files are missing or invalid. Please run 'glados download-models'")
-            sys.exit(1)
         start(args.config)
     elif args.command == "say":
-        if not models_valid():
-            print("Required model files are missing or invalid. Please run 'glados download-models'")
-            sys.exit(1)
         say(args.text, args.config)
     elif args.command == "call":
         asyncio.run(make_call(args.phone_number, args.config))
+    elif args.command == "webhook":
+        try:
+            with open(args.config) as f:
+                telnyx_config = yaml.safe_load(f)
+                telnyx_client = TelnyxClient(TelnyxConfig(**telnyx_config))
+                initialize_webhook_server(telnyx_client)
+                print(f"Starting webhook server on http://{args.host}:{args.port}")
+                start_webhook_server(host=args.host, port=args.port)
+        except Exception as e:
+            print(f"Error starting webhook server: {str(e)}")
+            sys.exit(1)
     else:
         parser.print_help()
-        sys.exit(1)
 
 
 if __name__ == "__main__":
