@@ -119,6 +119,11 @@ class CallManager:
             # Set up audio bridge
             session.audio_bridge = AudioBridge()
             await session.audio_bridge.start()
+            
+            # Store audio bridge reference in the call object
+            if call := self.telnyx_client._active_calls.get(call_control_id):
+                call.audio_bridge = session.audio_bridge
+            
             logger.info(f"Call answered and audio bridge started: {call_control_id}")
             
             # Start processing audio
@@ -178,6 +183,7 @@ class CallManager:
                                         # Generate and send audio response
                                         audio_response = session.tts.generate_speech_audio(spoken_text)
                                         await self.telnyx_client.send_audio(call_control_id, audio_response)
+                                        logger.info(f"Sent audio response to call {call_control_id}")
                             
                             buffer = []
 

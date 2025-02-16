@@ -24,6 +24,7 @@ def initialize_webhook_server(client: TelnyxClient) -> None:
     """
     global telnyx_client
     telnyx_client = client
+    logger.info("Webhook server initialized with TelnyxClient")
 
 
 @app.post("/webhook")
@@ -42,12 +43,18 @@ async def handle_webhook(request: Request):
         # Get the webhook payload
         payload = await request.json()
         
-        # Log the event type
-        event_type = payload.get("data", {}).get("event_type")
-        logger.info(f"Received webhook: {event_type}")
+        # Log the full payload for debugging
+        logger.debug(f"Received webhook payload: {payload}")
+        
+        # Extract event details
+        data = payload.get("data", {})
+        event_type = data.get("event_type")
+        call_control_id = data.get("payload", {}).get("call_control_id")
+        
+        logger.info(f"Processing webhook: {event_type} for call {call_control_id}")
         
         # Forward to TelnyxClient for processing
-        await telnyx_client.handle_webhook(payload.get("data", {}))
+        await telnyx_client.handle_webhook(data)
         
         return JSONResponse(content={"status": "success"})
         
@@ -64,4 +71,5 @@ def start_webhook_server(host: str = "0.0.0.0", port: int = 8000):
         host: The host to bind to
         port: The port to listen on
     """
+    logger.info(f"Starting webhook server on http://{host}:{port}")
     uvicorn.run(app, host=host, port=port) 

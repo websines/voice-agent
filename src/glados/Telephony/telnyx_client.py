@@ -174,6 +174,13 @@ class TelnyxClient:
     async def send_audio(self, call_id: str, audio_data: np.ndarray) -> None:
         """Send audio data to the call."""
         if call_id in self._audio_queues:
+            # Ensure audio is in the correct format (float32 [-1, 1])
+            if audio_data.dtype != np.float32:
+                audio_data = audio_data.astype(np.float32)
+            if audio_data.max() > 1.0 or audio_data.min() < -1.0:
+                audio_data = audio_data / 32767.0  # Normalize if in int16 range
+                
+            logger.debug(f"Sending {len(audio_data)} samples of audio to call {call_id}")
             await self._audio_queues[call_id].put(audio_data)
 
     async def _handle_incoming_audio(self, call_id: str, audio_data: bytes) -> None:
@@ -189,10 +196,13 @@ class TelnyxClient:
             if self.config.stream_config.channels > 1:
                 audio_array = audio_array.reshape(-1, self.config.stream_config.channels)
             
-            # Store in active calls for processing
-            if call_id in self._active_calls:
-                self._active_calls[call_id].audio_data = audio_array
-                logger.debug(f"Processed {len(audio_data)} bytes of audio for call {call_id}")
+            # Send to audio bridge for ASR processing
+            if call := self._active_calls.get(call_id):
+                if hasattr(call, 'audio_bridge') and call.audio_bridge:
+                    await call.audio_bridge.put_audio(audio_array)
+                    logger.debug(f"Sent {len(audio_data)} bytes to audio bridge for call {call_id}")
+                else:
+                    logger.warning(f"No audio bridge available for call {call_id}")
         except Exception as e:
             logger.error(f"Error processing incoming audio for call {call_id}: {e}")
 
@@ -225,16 +235,20 @@ class TelnyxClient:
         """Handle incoming webhook events from Telnyx."""
         try:
             event_type = payload.get("event_type")
-            logger.debug(f"Received webhook event: {event_type}")
+            call_id = payload.get("payload", {}).get("call_control_id")
+            logger.info(f"Handling webhook event: {event_type} for call {call_id}")
             
             # Call the registered handler if exists
             if handler := self._call_handlers.get(event_type):
                 await handler(payload)
+                logger.debug(f"Handler executed for {event_type}")
+            else:
+                logger.warning(f"No handler registered for event type: {event_type}")
             
             # Handle media streaming setup
             if event_type == "call.answered":
-                call_id = payload.get("payload", {}).get("call_control_id")
                 if call_id and call_id in self._active_calls:
+                    logger.info(f"Setting up media streaming for answered call: {call_id}")
                     # Start media streaming when call is answered
                     call = self._active_calls[call_id]
                     await call.answer_media_streaming(
@@ -248,5 +262,8 @@ class TelnyxClient:
                     
                     # Set up WebSocket after media streaming is started
                     await self._setup_websocket(call_id)
+                else:
+                    logger.warning(f"Call {call_id} not found in active calls for media setup")
         except Exception as e:
             logger.error(f"Error handling webhook: {e}")
+            logger.exception("Full webhook handling error:")
