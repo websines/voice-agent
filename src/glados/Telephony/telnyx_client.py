@@ -83,18 +83,11 @@ class TelnyxClient:
         """Set up WebSocket connection for media streaming."""
         try:
             # Construct WebSocket URL with authentication
-            ws_url = f"{self.config.stream_config.stream_url}"
+            ws_url = f"{self.config.stream_config.stream_url}?token={self.config.api_key}"
             
-            # Set up headers with bearer token authentication
-            headers = {
-                "Authorization": f"Bearer {self.config.api_key}",
-                "Content-Type": "application/json"
-            }
-            
-            # Connect to WebSocket with headers
+            # Connect to WebSocket
             ws = await websockets.connect(
                 ws_url,
-                additional_headers=headers,
                 subprotocols=["telnyx-media-v2"]
             )
             
