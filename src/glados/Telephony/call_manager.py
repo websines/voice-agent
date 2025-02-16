@@ -35,43 +35,25 @@ class CallSession(BaseModel):
 class CallManager:
     """
     Manages active call sessions and coordinates audio streaming.
-    
-    This class keeps track of active calls, manages their state, and coordinates
-    the audio streaming between Telnyx and GLaDOS's TTS/ASR components.
     """
     
     def __init__(self, telnyx_client: TelnyxClient):
-        """
-        Initialize the CallManager.
-        
-        Args:
-            telnyx_client: Instance of TelnyxClient for call control
-        """
+        """Initialize the CallManager."""
         self.telnyx_client = telnyx_client
         self._active_sessions: Dict[str, CallSession] = {}
         self._setup_call_handlers()
         
     def _setup_call_handlers(self) -> None:
-        """Register handlers for call events with the Telnyx client."""
+        """Register handlers for call events."""
         self.telnyx_client.register_call_handler("call.initiated", self._handle_call_initiated)
         self.telnyx_client.register_call_handler("call.answered", self._handle_call_answered)
         self.telnyx_client.register_call_handler("call.hangup", self._handle_call_hangup)
-        self.telnyx_client.register_call_handler("call.speaking.started", self._handle_speaking_started)
-        self.telnyx_client.register_call_handler("call.speaking.ended", self._handle_speaking_ended)
         
     async def start_call(self, phone_number: str) -> Optional[str]:
-        """
-        Start a new outbound call.
-        
-        Args:
-            phone_number: The phone number to call in E.164 format
-            
-        Returns:
-            call_control_id: The unique identifier for the call, or None if failed
-        """
+        """Start a new outbound call."""
         call_control_id = await self.telnyx_client.make_call(phone_number)
         if call_control_id:
-            # Initialize ASR, VAD, and TTS components
+            # Initialize session with GLaDOS components
             session = CallSession(
                 call_control_id=call_control_id,
                 start_time=datetime.now(),
@@ -83,28 +65,71 @@ class CallManager:
             )
             self._active_sessions[call_control_id] = session
             
-            # Start audio processing task
-            asyncio.create_task(self._process_audio(call_control_id))
+            # Have GLaDOS say hello when the call is answered
+            asyncio.create_task(self._say_hello(call_control_id))
+            
             return call_control_id
         return None
         
-    async def end_call(self, call_control_id: str) -> bool:
-        """
-        End an active call.
+    async def _say_hello(self, call_id: str) -> None:
+        """Have GLaDOS say hello when the call is answered."""
+        if session := self._active_sessions.get(call_id):
+            try:
+                # Wait a bit for the call to be fully established
+                await asyncio.sleep(1)
+                
+                # Generate GLaDOS greeting
+                if session.text_converter and session.tts:
+                    greeting = "Hello, and welcome to the Aperture Science Enrichment Center."
+                    spoken_text = session.text_converter.text_to_spoken(greeting)
+                    audio = session.tts.generate_speech_audio(spoken_text)
+                    
+                    # Send audio to the call
+                    await self.telnyx_client.send_audio(call_id, audio)
+                    logger.info(f"Sent greeting to call {call_id}")
+            except Exception as e:
+                logger.error(f"Error sending greeting: {e}")
         
-        Args:
-            call_control_id: The unique identifier for the call
-            
-        Returns:
-            bool: True if call was ended successfully, False otherwise
-        """
+    async def end_call(self, call_control_id: str) -> bool:
+        """End an active call."""
         if session := self._active_sessions.get(call_control_id):
-            if self.telnyx_client.end_call(call_control_id):
+            if await self.telnyx_client.end_call(call_control_id):
                 if session.audio_bridge:
                     await session.audio_bridge.stop()
                 del self._active_sessions[call_control_id]
                 return True
         return False
+        
+    async def _handle_call_initiated(self, payload: Dict[str, Any]) -> None:
+        """Handle call.initiated event."""
+        data = payload.get("payload", {})
+        call_control_id = data.get("call_control_id")
+        call_leg_id = data.get("call_leg_id")
+        
+        if session := self._active_sessions.get(call_control_id):
+            session.call_leg_id = call_leg_id
+            logger.info(f"Call initiated: {call_control_id} (leg: {call_leg_id})")
+            
+    async def _handle_call_answered(self, payload: Dict[str, Any]) -> None:
+        """Handle call.answered event."""
+        data = payload.get("payload", {})
+        call_control_id = data.get("call_control_id")
+        
+        if session := self._active_sessions.get(call_control_id):
+            # Set up audio bridge
+            session.audio_bridge = AudioBridge()
+            await session.audio_bridge.start()
+            logger.info(f"Call answered and audio bridge started: {call_control_id}")
+            
+            # Start processing audio
+            asyncio.create_task(self._process_audio(call_control_id))
+            
+    async def _handle_call_hangup(self, payload: Dict[str, Any]) -> None:
+        """Handle call.hangup event."""
+        data = payload.get("payload", {})
+        call_control_id = data.get("call_control_id")
+        await self.end_call(call_control_id)
+        logger.info(f"Call ended: {call_control_id}")
         
     async def _process_audio(self, call_control_id: str) -> None:
         """Process audio for ASR and TTS."""
@@ -152,50 +177,10 @@ class CallManager:
                                         
                                         # Generate and send audio response
                                         audio_response = session.tts.generate_speech_audio(spoken_text)
-                                        await session.audio_bridge.send_audio(audio_response)
+                                        await self.telnyx_client.send_audio(call_control_id, audio_response)
                             
                             buffer = []
 
             except Exception as e:
                 logger.error(f"Error processing audio in call {call_control_id}: {e}")
-                await asyncio.sleep(0.1)
-        
-    async def _handle_call_initiated(self, payload: Dict[str, Any]) -> None:
-        """Handle call.initiated event."""
-        data = payload.get("data", {}).get("payload", {})
-        call_control_id = data.get("call_control_id")
-        call_leg_id = data.get("call_leg_id")
-        
-        if session := self._active_sessions.get(call_control_id):
-            session.call_leg_id = call_leg_id
-            logger.info(f"Call initiated: {call_control_id} (leg: {call_leg_id})")
-            
-    async def _handle_call_answered(self, payload: Dict[str, Any]) -> None:
-        """Handle call.answered event."""
-        call_control_id = payload["data"]["payload"]["call_control_id"]
-        if session := self._active_sessions.get(call_control_id):
-            session.audio_bridge = AudioBridge()
-            await session.audio_bridge.start()
-            logger.info(f"Call answered and audio bridge started: {call_control_id}")
-            
-    async def _handle_call_hangup(self, payload: Dict[str, Any]) -> None:
-        """Handle call.hangup event."""
-        call_control_id = payload["data"]["payload"]["call_control_id"]
-        await self.end_call(call_control_id)
-        logger.info(f"Call ended: {call_control_id}")
-        
-    async def _handle_speaking_started(self, payload: Dict[str, Any]) -> None:
-        """Handle call.speaking.started event."""
-        call_control_id = payload["data"]["payload"]["call_control_id"]
-        if session := self._active_sessions.get(call_control_id):
-            if session.audio_bridge:
-                await session.audio_bridge.pause_tts()
-                logger.info(f"TTS paused - caller speaking in call {call_control_id}")
-                
-    async def _handle_speaking_ended(self, payload: Dict[str, Any]) -> None:
-        """Handle call.speaking.ended event."""
-        call_control_id = payload["data"]["payload"]["call_control_id"]
-        if session := self._active_sessions.get(call_control_id):
-            if session.audio_bridge:
-                await session.audio_bridge.resume_tts()
-                logger.info(f"TTS resumed - caller stopped speaking in call {call_control_id}") 
+                await asyncio.sleep(0.1) 

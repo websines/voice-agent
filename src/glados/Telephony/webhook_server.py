@@ -3,14 +3,11 @@ Webhook server for handling Telnyx events.
 """
 
 from typing import Optional
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 import uvicorn
 from loguru import logger
-import telnyx
-import os
 from .telnyx_client import TelnyxClient
-from telnyx.error import SignatureVerificationError
 
 app = FastAPI()
 
@@ -38,40 +35,25 @@ async def handle_webhook(request: Request):
     for processing.
     """
     if not telnyx_client:
-        raise HTTPException(status_code=500, detail="TelnyxClient not initialized")
+        logger.error("TelnyxClient not initialized")
+        return JSONResponse(status_code=500, content={"error": "Server not initialized"})
     
     try:
-        # Get the raw body for signature verification
-        body = await request.body()
+        # Get the webhook payload
+        payload = await request.json()
         
-        # Verify the webhook signature
-        signature = request.headers.get("telnyx-signature-ed25519", "")
-        timestamp = request.headers.get("telnyx-timestamp", "")
+        # Log the event type
+        event_type = payload.get("data", {}).get("event_type")
+        logger.info(f"Received webhook: {event_type}")
         
-        telnyx.public_key = "jLZ5RdA4O1WS38Svtc5Y5eBcWYOwWFAMr4+oSqQwDJo="
-        
-        try:
-            event = telnyx.Webhook.construct_event(
-                body,
-                signature,
-                timestamp,
-                tolerance=300
-            )
-        except ValueError as e:
-            logger.error(f"Invalid payload: {str(e)}")
-            raise HTTPException(status_code=400)
-        except SignatureVerificationError as e:
-            logger.error(f"Invalid signature: {str(e)}")
-            raise HTTPException(status_code=400)
-        
-        # Forward processed event
-        await telnyx_client.handle_webhook(event)
+        # Forward to TelnyxClient for processing
+        await telnyx_client.handle_webhook(payload.get("data", {}))
         
         return JSONResponse(content={"status": "success"})
         
     except Exception as e:
         logger.error(f"Error processing webhook: {str(e)}")
-        raise HTTPException(status_code=400, detail=str(e))
+        return JSONResponse(status_code=400, content={"error": str(e)})
 
 
 def start_webhook_server(host: str = "0.0.0.0", port: int = 8000):
