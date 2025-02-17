@@ -30,6 +30,7 @@ class CallSession(BaseModel):
     tts: Optional[GladosTTS] = None
     text_converter: Optional[SpokenTextConverter] = None
     metadata: Dict[str, Any] = {}
+    is_active: bool = True
 
 
 class CallManager:
@@ -96,6 +97,7 @@ class CallManager:
             if await self.telnyx_client.end_call(call_control_id):
                 if session.audio_bridge:
                     await session.audio_bridge.stop()
+                session.is_active = False
                 del self._active_sessions[call_control_id]
                 return True
         return False
@@ -107,28 +109,63 @@ class CallManager:
         call_id = payload_data.get('call_control_id')
         
         if not call_id:
-            logger.error(f"No call_control_id in payload: {payload}")
+            logger.error(f"No call_control_id in initiated payload: {payload}")
             return
-            
-        self._active_sessions[call_id] = CallSession(
-            call_control_id=call_id,
-            start_time=datetime.now(),
-            phone_number=payload_data.get('to', '')
-        )
-        logger.info(f"Call initiated: {call_id}")
         
-    async def _handle_call_answered(self, payload: Dict[str, Any]) -> None:
+        # Initialize session even for inbound calls
+        if call_id not in self._active_sessions:
+            session = CallSession(
+                call_control_id=call_id,
+                start_time=datetime.now(),
+                phone_number=payload_data.get('to', 'Unknown'),
+                asr=AudioTranscriber(),
+                vad=VAD(),
+                tts=GladosTTS(),
+                text_converter=SpokenTextConverter()
+            )
+            self._active_sessions[call_id] = session
+            logger.info(f"Initialized new session for call {call_id}")
+        
+    async def _handle_call_answered(self, payload: dict) -> None:
         """Handle call.answered event."""
         data = payload.get('data', {})
         payload_data = data.get('payload', {})
         call_id = payload_data.get('call_control_id')
         
         if not call_id:
-            logger.error(f"No call_control_id in answered payload: {payload}")
+            logger.error("Missing call_control_id in answered event")
             return
-            
+        
+        # Ensure session exists for both inbound and outbound calls
+        if call_id not in self._active_sessions:
+            logger.info(f"Creating new session for inbound call {call_id}")
+            session = CallSession(
+                call_control_id=call_id,
+                start_time=datetime.now(),
+                phone_number=payload_data.get('to', 'Unknown'),
+                asr=AudioTranscriber(),
+                vad=VAD(),
+                tts=GladosTTS(),
+                text_converter=SpokenTextConverter()
+            )
+            self._active_sessions[call_id] = session
+        
         if call_id in self._active_sessions:
-            # Start audio processing for the call
+            session = self._active_sessions[call_id]
+            # Initialize the AudioBridge if it hasn't been attached yet
+            if not session.audio_bridge:
+                session.audio_bridge = AudioBridge(
+                    sample_rate=self.telnyx_client.config.stream_config.sampling_rate,
+                    channels=self.telnyx_client.config.stream_config.channels
+                )
+                await session.audio_bridge.start()
+                logger.info(f"AudioBridge started for call {call_id}")
+                
+                # Attach the audio bridge to the underlying Telnyx call
+                if call := self.telnyx_client._active_calls.get(call_id):
+                    setattr(call, 'audio_bridge', session.audio_bridge)
+            
+            # Start audio processing
             asyncio.create_task(self._process_audio(call_id))
             # Have GLaDOS say hello
             await self._say_hello(call_id)
@@ -152,57 +189,19 @@ class CallManager:
         else:
             logger.warning(f"Call {call_id} not found in active sessions for hangup")
         
-    async def _process_audio(self, call_control_id: str) -> None:
-        """Process audio for ASR and TTS."""
-        session = self._active_sessions.get(call_control_id)
-        if not session or not session.audio_bridge:
-            return
-
-        buffer = []
-        is_speaking = False
-        
-        while call_control_id in self._active_sessions:
-            try:
-                # Get audio from the bridge
-                audio_chunk = await session.audio_bridge.get_audio()
-                if audio_chunk is None:
-                    await asyncio.sleep(0.01)
-                    continue
-
-                # Check if someone is speaking using VAD
-                if session.vad and not is_speaking:
-                    is_speaking = session.vad.is_speech(audio_chunk)
-                    if is_speaking:
-                        logger.info(f"Speech detected in call {call_control_id}")
-                        buffer = [audio_chunk]
-                elif session.vad and is_speaking:
-                    is_speaking = session.vad.is_speech(audio_chunk)
-                    if is_speaking:
-                        buffer.append(audio_chunk)
-                    else:
-                        # Speech ended, process the buffer
-                        if buffer:
-                            # Concatenate audio chunks
-                            full_audio = np.concatenate(buffer)
-                            
-                            # Perform ASR
-                            if session.asr:
-                                text = session.asr.transcribe(full_audio)
-                                if text:
-                                    logger.info(f"Transcribed text from call {call_control_id}: {text}")
-                                    
-                                    # Generate GLaDOS response
-                                    if session.text_converter and session.tts:
-                                        spoken_text = session.text_converter.text_to_spoken(text)
-                                        logger.info(f"GLaDOS response: {spoken_text}")
-                                        
-                                        # Generate and send audio response
-                                        audio_response = session.tts.generate_speech_audio(spoken_text)
-                                        await self.telnyx_client.send_audio(call_control_id, audio_response)
-                                        logger.info(f"Sent audio response to call {call_control_id}")
-                            
-                            buffer = []
-
-            except Exception as e:
-                logger.error(f"Error processing audio in call {call_control_id}: {e}")
-                await asyncio.sleep(0.1) 
+    async def _process_audio(self, call_id: str) -> None:
+        """Process audio for a call."""
+        try:
+            session = self._active_sessions[call_id]
+            while session.is_active:
+                if session.audio_bridge:
+                    audio = await session.audio_bridge.get_audio()
+                    if audio is not None:
+                        # Check for speech using VAD
+                        await session.vad.process_audio(audio)
+                        if session.vad.is_speech:
+                            text = await session.asr.transcribe(audio)
+                            if text:
+                                await self._handle_user_speech(call_id, text)
+        except Exception as e:
+            logger.error(f"Error processing audio in call {call_id}: {e}") 

@@ -118,21 +118,31 @@ class AudioBridge:
         except Exception as e:
             logger.error(f"Error sending audio data: {e}")
             
-    async def get_audio(self) -> Optional[np.ndarray]:
-        """
-        Get received audio data from the call (for ASR).
+    async def put_audio(self, audio_data: np.ndarray) -> None:
+        """Put audio data into the input queue for ASR processing."""
+        if not self.is_running:
+            return
         
-        Returns:
-            Optional[np.ndarray]: Audio data if available, None otherwise
-        """
-        if not self.is_running or self.input_queue.empty():
-            return None
-            
         try:
-            return self.input_queue.get_nowait()
+            # Ensure audio is in the correct format
+            if audio_data.dtype != np.float32:
+                audio_data = audio_data.astype(np.float32)
+            
+            # Put the audio data into the input queue
+            if not self.input_queue.full():
+                self.input_queue.put(audio_data)
+                logger.debug(f"Put {len(audio_data)} samples into input queue")
         except Exception as e:
-            logger.error(f"Error getting audio data: {e}")
-            return None
+            logger.error(f"Error putting audio into queue: {e}")
+
+    async def get_audio(self) -> Optional[np.ndarray]:
+        """Get audio data from the input queue for processing."""
+        try:
+            if not self.input_queue.empty():
+                return self.input_queue.get_nowait()
+        except Exception as e:
+            logger.error(f"Error getting audio from queue: {e}")
+        return None
             
     def _convert_channels(self, audio_data: np.ndarray) -> np.ndarray:
         """Convert audio data to the required number of channels."""

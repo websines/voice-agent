@@ -81,14 +81,21 @@ class TelnyxClient:
         try:
             ws_url = self.config.stream_config.stream_url
             
+            # Add proper authentication headers
+            headers = {
+                "Authorization": f"Bearer {self.config.api_key}",
+                "Telnyx-Call-Control-ID": call_id,
+                "User-Agent": "GLaDOS-Telephony/1.0",
+                "Content-Type": "application/json"
+            }
+
             # Connect to WebSocket with authentication headers
             ws = await websockets.connect(
                 ws_url,
                 subprotocols=["telnyx-media-v2"],
-                additional_headers={
-                    "Authorization": f"Bearer {self.config.api_key}",
-                    "Telnyx-Call-Control-ID": call_id
-                }
+                extra_headers=headers,  # Remove if using older websockets lib
+                ping_interval=20,
+                ping_timeout=300
             )
             
             # Send initial media configuration
@@ -118,26 +125,48 @@ class TelnyxClient:
         """Handle incoming WebSocket messages."""
         try:
             async for message in ws:
-                try:
-                    data = json.loads(message)
-                    event_type = data.get("event")
-                    
-                    if event_type == "media":
-                        # Handle incoming audio data
-                        audio_data = base64.b64decode(data["media"]["payload"])
-                        await self._handle_incoming_audio(call_id, audio_data)
-                    elif event_type == "media_start_success":
-                        logger.info(f"Media streaming started successfully for call {call_id}")
-                    elif event_type == "error":
-                        logger.error(f"WebSocket error for call {call_id}: {data.get('error', 'Unknown error')}")
-                        
-                except json.JSONDecodeError:
-                    logger.error(f"Invalid JSON received for call {call_id}")
-                except Exception as e:
-                    logger.error(f"Error handling WebSocket message for call {call_id}: {e}")
+                if isinstance(message, bytes):
+                    # Handle binary message (audio data)
+                    await self._handle_incoming_audio(call_id, message)
+                else:
+                    # Handle text message (control messages)
+                    try:
+                        data = json.loads(message)
+                        logger.debug(f"Received WebSocket message for call {call_id}: {data}")
+                    except json.JSONDecodeError:
+                        logger.error(f"Invalid JSON in WebSocket message for call {call_id}")
+        except websockets.exceptions.ConnectionClosed:
+            logger.info(f"WebSocket connection closed for call {call_id}")
         except Exception as e:
-            logger.error(f"WebSocket connection error for call {call_id}: {e}")
-            await self._cleanup_websocket(call_id)
+            logger.error(f"Error handling WebSocket messages for call {call_id}: {e}")
+        finally:
+            # Clean up when the connection is closed
+            if call_id in self._ws_connections:
+                del self._ws_connections[call_id]
+            logger.info(f"WebSocket handler ended for call {call_id}")
+
+    async def _handle_incoming_audio(self, call_id: str, audio_data: bytes) -> None:
+        """Handle incoming audio data from the call."""
+        try:
+            # Convert from bytes to numpy array with int16 type
+            audio_array = np.frombuffer(audio_data, dtype=np.int16)
+            
+            # Convert from int16 to float32 in the range [-1, 1] for our audio processing
+            audio_array = audio_array.astype(np.float32) / 32767.0
+            
+            # Reshape if needed for multi-channel audio
+            if self.config.stream_config.channels > 1:
+                audio_array = audio_array.reshape(-1, self.config.stream_config.channels)
+            
+            # Send the processed audio to the audio bridge (ASR pipeline)
+            if call := self._active_calls.get(call_id):
+                if hasattr(call, 'audio_bridge') and call.audio_bridge:
+                    await call.audio_bridge.put_audio(audio_array)
+                    logger.debug(f"Sent {len(audio_array)} samples to audio bridge for call {call_id}")
+                else:
+                    logger.warning(f"No audio bridge available for call {call_id}")
+        except Exception as e:
+            logger.error(f"Error processing incoming audio for call {call_id}: {e}")
 
     async def _handle_audio_queue(self, call_id: str, ws: websockets.WebSocketClientProtocol) -> None:
         """Handle outgoing audio queue."""
@@ -183,29 +212,6 @@ class TelnyxClient:
             logger.debug(f"Sending {len(audio_data)} samples of audio to call {call_id}")
             await self._audio_queues[call_id].put(audio_data)
 
-    async def _handle_incoming_audio(self, call_id: str, audio_data: bytes) -> None:
-        """Handle incoming audio data from the call."""
-        try:
-            # Convert from bytes to numpy array
-            audio_array = np.frombuffer(audio_data, dtype=np.int16)
-            
-            # Convert from int16 to float32 [-1, 1] for our audio processing
-            audio_array = audio_array.astype(np.float32) / 32767.0
-            
-            # Reshape if needed for channels
-            if self.config.stream_config.channels > 1:
-                audio_array = audio_array.reshape(-1, self.config.stream_config.channels)
-            
-            # Send to audio bridge for ASR processing
-            if call := self._active_calls.get(call_id):
-                if hasattr(call, 'audio_bridge') and call.audio_bridge:
-                    await call.audio_bridge.put_audio(audio_array)
-                    logger.debug(f"Sent {len(audio_data)} bytes to audio bridge for call {call_id}")
-                else:
-                    logger.warning(f"No audio bridge available for call {call_id}")
-        except Exception as e:
-            logger.error(f"Error processing incoming audio for call {call_id}: {e}")
-
     async def _cleanup_websocket(self, call_id: str) -> None:
         """Clean up WebSocket connection and related resources."""
         try:
@@ -234,14 +240,26 @@ class TelnyxClient:
     async def handle_webhook(self, payload: Dict[str, Any]) -> None:
         """Handle incoming webhook events from Telnyx."""
         try:
-            # Extract event type from the correct location in the payload
             event_data = payload.get("data", {})
             event_type = event_data.get("event_type")
             payload_data = event_data.get("payload", {})
             call_id = payload_data.get("call_control_id")
+
+            # Properly extract call_control_id for different event types
+            if not call_id:
+                call_id = event_data.get("id")  # Some events nest ID differently
             
-            logger.info(f"Handling webhook event: {event_type} for call {call_id}")
-            
+            logger.info(f"Handling {event_type} for call {call_id}")
+
+            # Auto-register call for any relevant event types
+            if call_id and call_id not in self._active_calls:
+                if event_type in ["call.initiated", "call.answered"]:
+                    logger.info(f"Auto-registering call {call_id} from {event_type}")
+                    call = await self._create_dummy_call(call_id)
+                    self._active_calls[call_id] = call
+                    self._audio_queues[call_id] = asyncio.Queue()
+                    logger.debug(f"Active calls: {list(self._active_calls.keys())}")
+
             # Call the registered handler if exists
             if handler := self._call_handlers.get(event_type):
                 await handler(payload)
@@ -268,5 +286,19 @@ class TelnyxClient:
                 else:
                     logger.warning(f"Call {call_id} not found in active calls for media setup")
         except Exception as e:
-            logger.error(f"Error handling webhook: {e}")
-            logger.exception("Full webhook handling error:")
+            logger.error(f"Error processing webhook: {e}")
+
+    async def _dummy_answer_media_streaming(self, **kwargs) -> None:
+        """Dummy method for auto-registered calls."""
+        logger.info("Using dummy answer_media_streaming for auto-registered call")
+        return
+
+    async def _create_dummy_call(self, call_id: str) -> Any:
+        """Create a minimal call object for inbound calls."""
+        call = type('Call', (), {
+            'call_control_id': call_id,
+            'answer_media_streaming': self._dummy_answer_media_streaming,
+            'hangup': lambda *args, **kwargs: logger.info(f"Dummy hangup for {call_id}"),
+            'send_audio': lambda x, *args, **kwargs: logger.debug(f"Dummy audio sent to {call_id}")
+        })()
+        return call

@@ -12,7 +12,7 @@ class VAD:
     VAD_MODEL: Path = Path("./models/ASR/silero_vad_v5.onnx")
     SAMPLE_RATE: int = 16000  # or 8000 only!
 
-    def __init__(self, model_path: Path = VAD_MODEL) -> None:
+    def __init__(self, model_path: Path = VAD_MODEL, threshold: float = 0.5) -> None:
         """Initialize a Voice Activity Detection (VAD) model with an ONNX runtime inference session.
 
         Parameters:
@@ -43,6 +43,9 @@ class VAD:
         self._last_batch_size: int
 
         self.reset_states()
+
+        self.threshold = threshold
+        self.is_speech = False
 
     def reset_states(self, batch_size: int = 1) -> None:
         self._state = np.zeros((2, batch_size, 128), dtype=np.float32)
@@ -136,6 +139,12 @@ class VAD:
             outs.append(out_chunk)
 
         return np.stack(outs)
+
+    async def process_audio(self, audio: np.ndarray) -> bool:
+        """Process audio chunk and update speech state."""
+        energy = np.mean(np.abs(audio))
+        self.is_speech = energy > self.threshold
+        return self.is_speech
 
     def __del__(self) -> None:
         """Clean up ONNX session to prevent context leaks."""
