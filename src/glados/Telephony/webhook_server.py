@@ -54,7 +54,7 @@ async def handle_webhook(request: Request):
         logger.info(f"Processing webhook: {event_type} for call {call_control_id}")
         
         # Forward to TelnyxClient for processing
-        await telnyx_client.handle_webhook(data)
+        await telnyx_client.handle_webhook(payload)
         
         return JSONResponse(content={"status": "success"})
         

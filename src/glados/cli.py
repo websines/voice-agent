@@ -235,6 +235,8 @@ def start(config_path: str | Path = "configs/glados_config.yaml") -> None:
         with open("configs/telnyx_config.yaml") as f:
             telnyx_config = yaml.safe_load(f)
             telnyx_client = TelnyxClient(TelnyxConfig(**telnyx_config))
+            # Initialize CallManager with the client
+            call_manager = CallManager(telnyx_client)
             # Initialize webhook server with the client
             initialize_webhook_server(telnyx_client)
             # Start webhook server in a separate thread
@@ -381,6 +383,9 @@ def main() -> None:
             with open(args.config) as f:
                 telnyx_config = yaml.safe_load(f)
                 telnyx_client = TelnyxClient(TelnyxConfig(**telnyx_config))
+                # Initialize CallManager with the client
+                call_manager = CallManager(telnyx_client)
+                # Initialize webhook server with the client
                 initialize_webhook_server(telnyx_client)
                 print(f"Starting webhook server on http://{args.host}:{args.port}")
                 start_webhook_server(host=args.host, port=args.port)

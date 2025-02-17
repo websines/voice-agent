@@ -100,41 +100,57 @@ class CallManager:
                 return True
         return False
         
-    async def _handle_call_initiated(self, payload: Dict[str, Any]) -> None:
-        """Handle call.initiated event."""
-        data = payload.get("payload", {})
-        call_control_id = data.get("call_control_id")
-        call_leg_id = data.get("call_leg_id")
+    async def _handle_call_initiated(self, payload: dict) -> None:
+        """Handle call initiation event."""
+        data = payload.get('data', {})
+        payload_data = data.get('payload', {})
+        call_id = payload_data.get('call_control_id')
         
-        if session := self._active_sessions.get(call_control_id):
-            session.call_leg_id = call_leg_id
-            logger.info(f"Call initiated: {call_control_id} (leg: {call_leg_id})")
+        if not call_id:
+            logger.error(f"No call_control_id in payload: {payload}")
+            return
             
+        self._active_sessions[call_id] = CallSession(
+            call_control_id=call_id,
+            start_time=datetime.now(),
+            phone_number=payload_data.get('to', '')
+        )
+        logger.info(f"Call initiated: {call_id}")
+        
     async def _handle_call_answered(self, payload: Dict[str, Any]) -> None:
         """Handle call.answered event."""
-        data = payload.get("payload", {})
-        call_control_id = data.get("call_control_id")
+        data = payload.get('data', {})
+        payload_data = data.get('payload', {})
+        call_id = payload_data.get('call_control_id')
         
-        if session := self._active_sessions.get(call_control_id):
-            # Set up audio bridge
-            session.audio_bridge = AudioBridge()
-            await session.audio_bridge.start()
+        if not call_id:
+            logger.error(f"No call_control_id in answered payload: {payload}")
+            return
             
-            # Store audio bridge reference in the call object
-            if call := self.telnyx_client._active_calls.get(call_control_id):
-                call.audio_bridge = session.audio_bridge
-            
-            logger.info(f"Call answered and audio bridge started: {call_control_id}")
-            
-            # Start processing audio
-            asyncio.create_task(self._process_audio(call_control_id))
-            
+        if call_id in self._active_sessions:
+            # Start audio processing for the call
+            asyncio.create_task(self._process_audio(call_id))
+            # Have GLaDOS say hello
+            await self._say_hello(call_id)
+            logger.info(f"Call answered and processing started: {call_id}")
+        else:
+            logger.warning(f"Call {call_id} not found in active sessions for answer")
+        
     async def _handle_call_hangup(self, payload: Dict[str, Any]) -> None:
         """Handle call.hangup event."""
-        data = payload.get("payload", {})
-        call_control_id = data.get("call_control_id")
-        await self.end_call(call_control_id)
-        logger.info(f"Call ended: {call_control_id}")
+        data = payload.get('data', {})
+        payload_data = data.get('payload', {})
+        call_id = payload_data.get('call_control_id')
+        
+        if not call_id:
+            logger.error(f"No call_control_id in hangup payload: {payload}")
+            return
+            
+        if call_id in self._active_sessions:
+            await self.end_call(call_id)
+            logger.info(f"Call ended: {call_id}")
+        else:
+            logger.warning(f"Call {call_id} not found in active sessions for hangup")
         
     async def _process_audio(self, call_control_id: str) -> None:
         """Process audio for ASR and TTS."""

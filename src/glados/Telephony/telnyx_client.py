@@ -82,13 +82,16 @@ class TelnyxClient:
     async def _setup_websocket(self, call_id: str) -> None:
         """Set up WebSocket connection for media streaming."""
         try:
-            # Construct WebSocket URL with authentication
-            ws_url = f"{self.config.stream_config.stream_url}?token={self.config.api_key}"
+            ws_url = self.config.stream_config.stream_url
             
-            # Connect to WebSocket
+            # Connect to WebSocket with authentication headers
             ws = await websockets.connect(
                 ws_url,
-                subprotocols=["telnyx-media-v2"]
+                subprotocols=["telnyx-media-v2"],
+                additional_headers={
+                    "Authorization": f"Bearer {self.config.api_key}",
+                    "Telnyx-Call-Control-ID": call_id
+                }
             )
             
             # Send initial media configuration
@@ -234,8 +237,12 @@ class TelnyxClient:
     async def handle_webhook(self, payload: Dict[str, Any]) -> None:
         """Handle incoming webhook events from Telnyx."""
         try:
-            event_type = payload.get("event_type")
-            call_id = payload.get("payload", {}).get("call_control_id")
+            # Extract event type from the correct location in the payload
+            event_data = payload.get("data", {})
+            event_type = event_data.get("event_type")
+            payload_data = event_data.get("payload", {})
+            call_id = payload_data.get("call_control_id")
+            
             logger.info(f"Handling webhook event: {event_type} for call {call_id}")
             
             # Call the registered handler if exists
