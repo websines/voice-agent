@@ -80,6 +80,7 @@ class TelnyxClient:
         """Set up WebSocket connection for media streaming."""
         try:
             ws_url = self.config.stream_config.stream_url
+            logger.info(f"Setting up WebSocket for call {call_id} at URL: {ws_url}")
             
             # Add proper authentication headers
             headers = {
@@ -93,13 +94,14 @@ class TelnyxClient:
             ws = await websockets.connect(
                 ws_url,
                 subprotocols=["telnyx-media-v2"],
-                extra_headers=headers,  # Remove if using older websockets lib
+                extra_headers=headers,
                 ping_interval=20,
                 ping_timeout=300
             )
+            logger.info(f"WebSocket connected for call {call_id}")
             
             # Send initial media configuration
-            await ws.send(json.dumps({
+            start_message = {
                 "event": "media_start",
                 "call_control_id": call_id,
                 "media": {
@@ -108,7 +110,9 @@ class TelnyxClient:
                     "sampling_rate": self.config.stream_config.sampling_rate,
                     "channels": self.config.stream_config.channels
                 }
-            }))
+            }
+            await ws.send(json.dumps(start_message))
+            logger.info(f"Sent media_start message: {json.dumps(start_message, indent=2)}")
             
             self._ws_connections[call_id] = ws
             
@@ -116,29 +120,32 @@ class TelnyxClient:
             asyncio.create_task(self._handle_websocket_messages(call_id, ws))
             asyncio.create_task(self._handle_audio_queue(call_id, ws))
             
-            logger.info(f"WebSocket connection established for call {call_id}")
+            logger.info(f"WebSocket handlers started for call {call_id}")
         except Exception as e:
             logger.error(f"Failed to setup WebSocket for call {call_id}: {e}")
+            logger.exception(e)  # Log full traceback
             await self.end_call(call_id)
 
     async def _handle_websocket_messages(self, call_id: str, ws: websockets.WebSocketClientProtocol) -> None:
         """Handle incoming WebSocket messages."""
         try:
+            logger.info(f"Started WebSocket message handler for call {call_id}")
             async for message in ws:
                 if isinstance(message, bytes):
                     # Handle binary message (audio data)
+                    logger.info(f"[TELNYX AUDIO] Received binary audio data for call {call_id}, size: {len(message)} bytes")
                     await self._handle_incoming_audio(call_id, message)
                 else:
                     # Handle text message (control messages)
                     try:
                         data = json.loads(message)
-                        logger.debug(f"Received WebSocket message for call {call_id}: {data}")
+                        logger.info(f"[TELNYX MSG] {json.dumps(data, indent=2)}")
                     except json.JSONDecodeError:
                         logger.error(f"Invalid JSON in WebSocket message for call {call_id}")
         except websockets.exceptions.ConnectionClosed:
             logger.info(f"WebSocket connection closed for call {call_id}")
         except Exception as e:
-            logger.error(f"Error handling WebSocket messages for call {call_id}: {e}")
+            logger.error(f"Error in WebSocket message handler for call {call_id}: {e}")
         finally:
             # Clean up when the connection is closed
             if call_id in self._ws_connections:
@@ -245,6 +252,9 @@ class TelnyxClient:
             payload_data = event_data.get("payload", {})
             call_id = payload_data.get("call_control_id")
 
+            # Log the full webhook payload for debugging
+            logger.info(f"[TELNYX WEBHOOK] Received event: {json.dumps(payload, indent=2)}")
+
             # Properly extract call_control_id for different event types
             if not call_id:
                 call_id = event_data.get("id")  # Some events nest ID differently
@@ -265,13 +275,22 @@ class TelnyxClient:
                 await handler(payload)
                 logger.debug(f"Handler executed for {event_type}")
             else:
-                logger.warning(f"No handler registered for event type: {event_type}")
+                logger.debug(f"No handler registered for event type: {event_type}")
             
             # Handle media streaming setup
             if event_type == "call.answered":
                 if call_id and call_id in self._active_calls:
                     logger.info(f"Setting up media streaming for answered call: {call_id}")
                     call = self._active_calls[call_id]
+                    
+                    # First, ensure we have the media URL
+                    if not self.config.stream_config.stream_url:
+                        logger.error("No media streaming URL configured!")
+                        return
+                        
+                    logger.info(f"Using media URL: {self.config.stream_config.stream_url}")
+                    
+                    # Set up media streaming
                     await call.answer_media_streaming(
                         media_url=self.config.stream_config.stream_url,
                         media_streaming_track=self.config.stream_config.stream_track,
@@ -287,6 +306,7 @@ class TelnyxClient:
                     logger.warning(f"Call {call_id} not found in active calls for media setup")
         except Exception as e:
             logger.error(f"Error processing webhook: {e}")
+            logger.exception(e)  # Log full traceback
 
     async def _dummy_answer_media_streaming(self, **kwargs) -> None:
         """Dummy method for auto-registered calls."""

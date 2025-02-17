@@ -292,6 +292,19 @@ async def make_call(phone_number: str, config_path: str | Path = "configs/telnyx
         client = TelnyxClient(telnyx_config)
         manager = CallManager(client)
         
+        # Initialize and start webhook server
+        initialize_webhook_server(client)
+        webhook_task = asyncio.create_task(
+            asyncio.to_thread(
+                start_webhook_server,
+                host="127.0.0.1",
+                port=8000
+            )
+        )
+        
+        # Give webhook server time to start
+        await asyncio.sleep(2)
+        
         # Start the call
         call_id = await manager.start_call(phone_number)
         if call_id:
