@@ -57,7 +57,7 @@ class TelnyxClient:
                 connection_id=self.config.sip_connection_id,
                 to=to_number,
                 from_=self.config.from_number,
-                record_audio="dual",  # Enable recording for media streaming
+                record_audio="dual",
                 media_url=self.config.stream_config.stream_url,
                 media_streaming_track=self.config.stream_config.stream_track,
                 media_streaming_codec=self.config.stream_config.codec,
@@ -68,9 +68,6 @@ class TelnyxClient:
             call_id = call.call_control_id
             self._active_calls[call_id] = call
             self._audio_queues[call_id] = asyncio.Queue()
-            
-            # Set up WebSocket connection for media streaming
-            await self._setup_websocket(call_id)
             
             logger.info(f"Initiated call to {to_number} with ID: {call_id}")
             return call_id
@@ -256,7 +253,6 @@ class TelnyxClient:
             if event_type == "call.answered":
                 if call_id and call_id in self._active_calls:
                     logger.info(f"Setting up media streaming for answered call: {call_id}")
-                    # Start media streaming when call is answered
                     call = self._active_calls[call_id]
                     await call.answer_media_streaming(
                         media_url=self.config.stream_config.stream_url,
@@ -267,7 +263,7 @@ class TelnyxClient:
                     )
                     logger.info(f"Media streaming started for call: {call_id}")
                     
-                    # Set up WebSocket after media streaming is started
+                    # Now we set up the WebSocket connection
                     await self._setup_websocket(call_id)
                 else:
                     logger.warning(f"Call {call_id} not found in active calls for media setup")
